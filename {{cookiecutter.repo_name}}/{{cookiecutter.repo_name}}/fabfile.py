@@ -8,16 +8,20 @@ Use `fab --list` to see available targets and actions.
 import ConfigParser
 import string
 import os
+import re
+import json
 
 from StringIO import StringIO
 from distutils.version import LooseVersion
 
-from fabric import colors
-from fabric.api import abort, cd, env, prompt, require, sudo, task
+from fabric import colors, operations
+from fabric.api import abort, cd, env, prompt, require, sudo, task, local
 from fabric.contrib.console import confirm
 from fabric.operations import get, put
 from fabric.contrib.files import append, exists
 from fabric.utils import indent
+
+from boto.s3.connection import S3Connection
 
 from django.utils.crypto import get_random_string
 
@@ -703,3 +707,89 @@ def ensure_local_py_exists():
         content = string.Template("from settings.${target} import *\n").substitute(target=env.target)
 
         put(StringIO(content), django_local_settings, use_sudo=True)
+
+
+def copy_server_media(volumes_dir):
+    # TODO: Should come from docker-compose.yml by parsing volumes
+    media_files_remote_dir = '/var/lib/docker-nginx/files/{{ cookiecutter.repo_name }}/media'
+    operations.get(media_files_remote_dir, volumes_dir)
+
+
+def copy_s3_media(settings, volumes_dir):
+    c = S3Connection(settings['AWS_ACCESS_KEY_ID'], settings['AWS_SECRET_ACCESS_KEY'])
+    bucket = c.get_bucket(settings['AWS_STORAGE_BUCKET_NAME'])
+    for key in bucket.list():
+        # TODO: Need to parse filename and create folder structure
+        key.get_contents_to_filename(os.path.join(volumes_dir, key.name))
+
+
+@task
+def copy_media(s3=True):
+    require('hosts')
+    require('code_dir')
+
+    remote_settings = management_cmd(
+        'settings --keys '
+        'AWS_ACCESS_KEY_ID '
+        'AWS_SECRET_ACCESS_KEY '
+        'AWS_STORAGE_BUCKET_NAME '
+    )
+    remote_settings = json.loads(re.search(r'{.*', remote_settings, flags=re.DOTALL).group())
+
+    # TODO: What if locally we have setup without S3 and on staging is S3? With template upgrade should not be an issue
+    is_s3 = remote_settings['AWS_ACCESS_KEY_ID'] != '<unset>'
+
+    print(colors.blue('Copying media files from ' + (is_s3 and 'S3 bucket' or 'remote server')))
+    print(colors.yellow('You need to be the owner of the ".data/media" directory!'))
+
+    # Probably can get this value from composer file by parsing yml?
+    volumes_dir = '../.data'
+
+    if is_s3:
+        copy_s3_media(remote_settings, volumes_dir)
+    else:
+        copy_server_media(volumes_dir)
+
+    print(colors.green('Success!'))
+
+
+@task
+def restore_db():
+    print(colors.blue('Restoring the database from the remote server'))
+    require('hosts')
+    require('code_dir')
+
+    postgres_ver = '10'
+    dump_filename = '{{ cookiecutter.repo_name }}-dump.sql'
+    project_name = '{{ cookiecutter.repo_name }}'
+    dump_path = os.path.join('/', 'tmp', dump_filename)
+
+    sudo('rm -f ' + dump_path)
+    sudo('docker exec -i postgres-{postgres_ver} pg_dump -U postgres {project_name} > {dump_path}'.format(
+        postgres_ver=postgres_ver, project_name=project_name, dump_path=dump_path))
+    operations.get(dump_path, '.')
+    sudo('rm -f ' + dump_path)
+    operations.local('docker-compose down')
+    operations.local('sudo rm -rf ../.data/postgres')
+    operations.local('docker-compose up -d postgres')
+    sleep(30)
+    # This returns id of the latest created container
+    local_db_container_id = operations.local('docker ps -lq', capture=True)
+    operations.local(
+        'cat {dump_filename} | docker exec -i "{container_id}" psql -U {project_name}'.format(
+            dump_filename=dump_filename,
+            container_id=local_db_container_id,
+            project_name=project_name,
+        )
+    )
+    operations.local('rm -f ' + dump_filename)
+    # We can run migrate locally, but sometimes it can contain long datamigration
+    # operations.local('docker-compose run --rm django ./manage.py migrate')
+    operations.local('docker-compose down')
+    print(colors.green('Success!'))
+
+
+@task
+def local_mirror():
+    copy_media()
+    restore_db()
