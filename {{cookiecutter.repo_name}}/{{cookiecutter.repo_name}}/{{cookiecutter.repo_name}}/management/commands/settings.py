@@ -1,7 +1,11 @@
 from django.core.management.base import BaseCommand
 
 import json
-import environ
+# package might not be installed
+try:
+    import environ
+except:
+    environ = None
 from django.conf import settings
 
 
@@ -11,7 +15,7 @@ class SettingsEncoder(json.JSONEncoder):
         if isinstance(obj, set):
             return list(obj)
 
-        if isinstance(obj, environ.Path):
+        if environ and isinstance(obj, environ.Path):
             return str(obj)
 
         # Let the base class default method raise the TypeError

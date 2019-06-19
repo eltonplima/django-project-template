@@ -4,12 +4,13 @@ Usage:
 
 Use `fab --list` to see available targets and actions.
 """
-
+from time import sleep
 import ConfigParser
 import string
 import os
 import re
 import json
+import yaml
 
 from StringIO import StringIO
 from distutils.version import LooseVersion
@@ -21,7 +22,7 @@ from fabric.operations import get, put
 from fabric.contrib.files import append, exists
 from fabric.utils import indent
 
-from boto.s3.connection import S3Connection
+import boto3
 
 from django.utils.crypto import get_random_string
 
@@ -513,7 +514,7 @@ def docker_restart(silent=False, force_recreate=False):
 def management_cmd(cmd):
     """ Perform a management command on the target. """
 
-    docker_compose_run('django', 'python manage.py ' + cmd)
+    return docker_compose_run('django', 'python manage.py ' + cmd)
 
 
 @task
@@ -611,11 +612,15 @@ def get_current_version_summary():
 
 def docker_compose(cmd):
     with cd(env.code_dir):
-        sudo('docker-compose -f docker-compose.production.yml ' + cmd)
+        res = sudo('docker-compose -f docker-compose.production.yml ' + cmd)
+        try:
+            return res.stdout
+        except:
+            pass
 
 
-def docker_compose_run(service, cmd='', name='{{cookiecutter.repo_name}}_tmp'):
-    docker_compose('run --rm --name {name} {service} {cmd}'.format(name=name, service=service, cmd=cmd))
+def docker_compose_run(service, cmd='', name='sahra_tmp'):
+    return docker_compose('run --rm --name {name} {service} {cmd}'.format(name=name, service=service, cmd=cmd))
 
 
 def get_config_modified_patterns(key):
@@ -709,41 +714,78 @@ def ensure_local_py_exists():
         put(StringIO(content), django_local_settings, use_sudo=True)
 
 
+def get_docker_compose_config(local=False):
+    if local:
+        result = operations.local('docker-compose config', capture=True)
+    else:
+        result = docker_compose('config')
+    try:
+        return yaml.load(result)
+    except:
+        return None
+
+
+def get_media_dir(local=False):
+    config = get_docker_compose_config(local=local)
+    media_volume = next(
+        volume for volume in config['services']['django']['volumes'] if '/files/media' in volume)
+    media_dir = media_volume.split(':')[0]
+    return media_dir
+
+
 def copy_server_media(volumes_dir):
-    # TODO: Should come from docker-compose.yml by parsing volumes
-    media_files_remote_dir = '/var/lib/docker-nginx/files/{{ cookiecutter.repo_name }}/media'
-    operations.get(media_files_remote_dir, volumes_dir)
+    remote_media_dir = get_media_dir(local=False)
+    operations.get(remote_media_dir, volumes_dir)
 
 
 def copy_s3_media(settings, volumes_dir):
-    c = S3Connection(settings['AWS_ACCESS_KEY_ID'], settings['AWS_SECRET_ACCESS_KEY'])
-    bucket = c.get_bucket(settings['AWS_STORAGE_BUCKET_NAME'])
-    for key in bucket.list():
-        # TODO: Need to parse filename and create folder structure
-        key.get_contents_to_filename(os.path.join(volumes_dir, key.name))
+    resource = boto3.Session(
+        aws_access_key_id=settings['AWS_ACCESS_KEY_ID'],
+        aws_secret_access_key=settings['AWS_SECRET_ACCESS_KEY'],
+    ).resource('s3')
+    bucket = resource.Bucket(settings['AWS_STORAGE_BUCKET_NAME'])
+
+    for obj in bucket.objects.all():
+        file_path = os.path.join(volumes_dir, obj.key)
+        path = os.path.dirname(file_path)
+        if not os.path.exists(path):
+            os.makedirs(path)
+        # we might have objects pretending to be folders
+        if not obj.key.endswith('/'):
+            bucket.download_file(obj.key, file_path)
 
 
 @task
-def copy_media(s3=True):
+def copy_media():
     require('hosts')
     require('code_dir')
+    print(colors.blue('Restoring the media from the remote server'))
 
-    remote_settings = management_cmd(
+    media_dir = get_media_dir(local=True)
+    volumes_dir = os.path.dirname(media_dir)
+
+    std_out = management_cmd(
         'settings --keys '
         'AWS_ACCESS_KEY_ID '
         'AWS_SECRET_ACCESS_KEY '
         'AWS_STORAGE_BUCKET_NAME '
     )
-    remote_settings = json.loads(re.search(r'{.*', remote_settings, flags=re.DOTALL).group())
+
+    remote_settings = json.loads(re.search(r'{.*', std_out, flags=re.DOTALL).group())
 
     # TODO: What if locally we have setup without S3 and on staging is S3? With template upgrade should not be an issue
     is_s3 = remote_settings['AWS_ACCESS_KEY_ID'] != '<unset>'
 
-    print(colors.blue('Copying media files from ' + (is_s3 and 'S3 bucket' or 'remote server')))
-    print(colors.yellow('You need to be the owner of the ".data/media" directory!'))
+    print(colors.blue('Copying media files from ' + ('S3 bucket' if is_s3 else 'remote server')))
 
-    # Probably can get this value from composer file by parsing yml?
-    volumes_dir = '../.data'
+    user = os.getlogin()
+    print(colors.yellow('%s be the owner of the ".data" and ".data/media" directory!' % user))
+
+    # You need to be the owner of the ".data/media" directory to allow downloading into .data folder
+    if os.path.isdir(volumes_dir):
+        operations.local('sudo chown %s %s' % (user, volumes_dir))
+    if os.path.isdir(media_dir):
+        operations.local('sudo chown %s %s' % (user, media_dir))
 
     if is_s3:
         copy_s3_media(remote_settings, volumes_dir)
@@ -755,34 +797,64 @@ def copy_media(s3=True):
 
 @task
 def restore_db():
-    print(colors.blue('Restoring the database from the remote server'))
     require('hosts')
     require('code_dir')
+    print(colors.blue('Restoring the database from the remote server'))
 
     postgres_ver = '10'
     dump_filename = '{{ cookiecutter.repo_name }}-dump.sql'
     project_name = '{{ cookiecutter.repo_name }}'
     dump_path = os.path.join('/', 'tmp', dump_filename)
 
-    sudo('rm -f ' + dump_path)
-    sudo('docker exec -i postgres-{postgres_ver} pg_dump -U postgres {project_name} > {dump_path}'.format(
-        postgres_ver=postgres_ver, project_name=project_name, dump_path=dump_path))
-    operations.get(dump_path, '.')
-    sudo('rm -f ' + dump_path)
+    media_dir = get_media_dir(local=True)
+    volumes_dir = os.path.dirname(media_dir)
+
+    postgres_dir = os.path.join(volumes_dir, 'postgres')
+    file_dir = os.path.join(postgres_dir, dump_filename)
+    download_dir = os.path.join(volumes_dir, dump_filename)
     operations.local('docker-compose down')
-    operations.local('sudo rm -rf ../.data/postgres')
-    operations.local('docker-compose up -d postgres')
-    sleep(30)
+
+    if os.path.isdir(postgres_dir):
+        if confirm("Do you want to overwrite current postgres database? '%s'" % postgres_dir):
+            operations.local('sudo rm -rf %s' % postgres_dir)
+        else:
+            operations.local('sudo mv %s %s-old' % (postgres_dir, postgres_dir))
+
+    # assert not os.path.isdir(postgres_dir), 'Postgres should have been nuked'
+    operations.local('docker-compose up -d --build postgres')
+
+    # TODO: we ensure that the folder is created, but not that the port is active
+    for retry in range(0, 30, 2):
+        if os.path.isdir(postgres_dir):
+            break
+        sleep(1)
+    print(colors.blue('Postgres cleaned!'))
+
+    # You need to be the owner of the ".data" directory!
+    user = os.getlogin()
+    operations.local('sudo chown %s %s' % (user, volumes_dir))
+
+    # we could use backupninja to dump postgres also, but currently this allows for more control
+    sudo('rm -f ' + dump_path)
+    sudo('docker exec -i postgres-{postgres_ver} '
+         'pg_dump -U {project_name}  --format=custom --compress=0 {project_name} '
+         '> {dump_path}'.format(postgres_ver=postgres_ver, project_name=project_name, dump_path=dump_path))
+
+    # retrieve and release disk space
+    operations.get(dump_path, download_dir)
+    operations.local('sudo mv %s %s' % (download_dir, file_dir))
+    sudo('rm -f ' + dump_path)
+
     # This returns id of the latest created container
     local_db_container_id = operations.local('docker ps -lq', capture=True)
     operations.local(
-        'cat {dump_filename} | docker exec -i "{container_id}" psql -U {project_name}'.format(
+        'docker-compose exec postgres '
+        'pg_restore --user {project_name} -d  {project_name} /var/lib/postgresql/data/{dump_filename}'.format(
             dump_filename=dump_filename,
             container_id=local_db_container_id,
             project_name=project_name,
         )
     )
-    operations.local('rm -f ' + dump_filename)
     # We can run migrate locally, but sometimes it can contain long datamigration
     # operations.local('docker-compose run --rm django ./manage.py migrate')
     operations.local('docker-compose down')
