@@ -1,12 +1,14 @@
+import json
+
+from django.conf import settings
 from django.core.management.base import BaseCommand
 
-import json
+
 # package might not be installed
 try:
     import environ
 except:
     environ = None
-from django.conf import settings
 
 
 class SettingsEncoder(json.JSONEncoder):
