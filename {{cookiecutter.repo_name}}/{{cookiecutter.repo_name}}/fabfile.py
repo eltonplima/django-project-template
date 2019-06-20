@@ -16,7 +16,7 @@ from StringIO import StringIO
 from distutils.version import LooseVersion
 
 from fabric import colors, operations
-from fabric.api import abort, cd, env, prompt, require, sudo, task, local
+from fabric.api import abort, cd, env, prompt, require, sudo, task, local, warn_only
 from fabric.contrib.console import confirm
 from fabric.operations import get, put
 from fabric.contrib.files import append, exists
@@ -619,7 +619,7 @@ def docker_compose(cmd):
             pass
 
 
-def docker_compose_run(service, cmd='', name='sahra_tmp'):
+def docker_compose_run(service, cmd='', name='{{cookiecutter.repo_name}}_tmp'):
     return docker_compose('run --rm --name {name} {service} {cmd}'.format(name=name, service=service, cmd=cmd))
 
 
@@ -733,9 +733,24 @@ def get_media_dir(local=False):
     return media_dir
 
 
-def copy_server_media(volumes_dir):
+def copy_server_media(media_dir, volumes_dir):
     remote_media_dir = get_media_dir(local=False)
-    operations.get(remote_media_dir, volumes_dir)
+    project_name = '{{ cookiecutter.repo_name }}'
+    dump_filename = '%s-media.zip' % project_name
+    dump_path = os.path.join('/', 'tmp', dump_filename)
+    download_dir = os.path.join(volumes_dir, dump_filename)
+
+    # clean previous dump
+    sudo('rm -f %s' % dump_path)
+
+    # f-ing zip does not have a flag to disable parent folder inclusion :(
+    with cd(remote_media_dir):
+        sudo('sudo zip -r %s *' % dump_path)
+
+    # retrieve and release disk space
+    operations.get(dump_path, download_dir)
+    operations.local('sudo unzip -o %s -d %s' % (download_dir, media_dir))
+    sudo('rm -f %s' % dump_path)
 
 
 def copy_s3_media(settings, volumes_dir):
@@ -756,7 +771,7 @@ def copy_s3_media(settings, volumes_dir):
 
 
 @task
-def copy_media():
+def restore_media():
     require('hosts')
     require('code_dir')
     print(colors.blue('Restoring the media from the remote server'))
@@ -771,17 +786,17 @@ def copy_media():
         'AWS_STORAGE_BUCKET_NAME '
     )
 
+    # this can fail for no apparent reason
     remote_settings = json.loads(re.search(r'{.*', std_out, flags=re.DOTALL).group())
 
     # TODO: What if locally we have setup without S3 and on staging is S3? With template upgrade should not be an issue
-    is_s3 = remote_settings['AWS_ACCESS_KEY_ID'] != '<unset>'
+    is_s3 = remote_settings.get('AWS_ACCESS_KEY_ID', '<unset>') != '<unset>'
 
     print(colors.blue('Copying media files from ' + ('S3 bucket' if is_s3 else 'remote server')))
 
-    user = os.getlogin()
-    print(colors.yellow('%s be the owner of the ".data" and ".data/media" directory!' % user))
-
     # You need to be the owner of the ".data/media" directory to allow downloading into .data folder
+    user = os.getlogin()
+    print(colors.yellow('%s needs to be the owner of the ".data" and ".data/media" directory!' % user))
     if os.path.isdir(volumes_dir):
         operations.local('sudo chown %s %s' % (user, volumes_dir))
     if os.path.isdir(media_dir):
@@ -790,7 +805,7 @@ def copy_media():
     if is_s3:
         copy_s3_media(remote_settings, volumes_dir)
     else:
-        copy_server_media(volumes_dir)
+        copy_server_media(media_dir, volumes_dir)
 
     print(colors.green('Success!'))
 
@@ -801,7 +816,6 @@ def restore_db():
     require('code_dir')
     print(colors.blue('Restoring the database from the remote server'))
 
-    postgres_ver = '10'
     dump_filename = '{{ cookiecutter.repo_name }}-dump.sql'
     project_name = '{{ cookiecutter.repo_name }}'
     dump_path = os.path.join('/', 'tmp', dump_filename)
@@ -835,33 +849,34 @@ def restore_db():
     operations.local('sudo chown %s %s' % (user, volumes_dir))
 
     # we could use backupninja to dump postgres also, but currently this allows for more control
-    sudo('rm -f ' + dump_path)
-    sudo('docker exec -i postgres-{postgres_ver} '
+    sudo('rm -f %s' % dump_path)
+    sudo('docker exec -i $(docker ps -f name=postgres- -lq) '
          'pg_dump -U {project_name}  --format=custom --compress=0 {project_name} '
-         '> {dump_path}'.format(postgres_ver=postgres_ver, project_name=project_name, dump_path=dump_path))
+         '> {dump_path}'.format(project_name=project_name, dump_path=dump_path))
 
     # retrieve and release disk space
     operations.get(dump_path, download_dir)
     operations.local('sudo mv %s %s' % (download_dir, file_dir))
-    sudo('rm -f ' + dump_path)
+    sudo('rm -f %s' % dump_path)
 
-    # This returns id of the latest created container
-    local_db_container_id = operations.local('docker ps -lq', capture=True)
-    operations.local(
-        'docker-compose exec postgres '
-        'pg_restore --user {project_name} -d  {project_name} /var/lib/postgresql/data/{dump_filename}'.format(
-            dump_filename=dump_filename,
-            container_id=local_db_container_id,
-            project_name=project_name,
+    # the pg_restore can throw some warnings and report them as errors,
+    # which don't affect the end result and are better left to be handled by the developer
+    with warn_only():
+        operations.local(
+            'docker-compose exec postgres '
+            'pg_restore --user {project_name} -d  {project_name} /var/lib/postgresql/data/{dump_filename}'.format(
+                dump_filename=dump_filename,
+                project_name=project_name,
+            ),
+
         )
-    )
     # We can run migrate locally, but sometimes it can contain long datamigration
     # operations.local('docker-compose run --rm django ./manage.py migrate')
     operations.local('docker-compose down')
-    print(colors.green('Success!'))
+    print(colors.green('Completed!'))
 
 
 @task
 def local_mirror():
-    copy_media()
+    restore_media()
     restore_db()
