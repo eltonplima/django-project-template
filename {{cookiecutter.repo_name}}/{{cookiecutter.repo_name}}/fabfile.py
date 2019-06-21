@@ -769,7 +769,9 @@ def copy_s3_media(settings, volumes_dir):
     ).resource('s3')
     bucket = resource.Bucket(settings['AWS_STORAGE_BUCKET_NAME'])
 
-    for obj in bucket.objects.all():
+    objects = bucket.objects.all()
+    objects = sorted(objects, key=lambda o: len(o.key), reverse=True)
+    for obj in objects:
         file_path = os.path.join(volumes_dir, obj.key)
         path = os.path.dirname(file_path)
         if not os.path.exists(path):
@@ -796,7 +798,7 @@ def restore_media():
     )
 
     # this can fail for no apparent reason
-    remote_settings = json.loads(re.search(r'{.*', std_out, flags=re.DOTALL).group())
+    remote_settings = json.loads(re.search(r"{[^}]*?}", std_out).group())
 
     # TODO: What if locally we have setup without S3 and on staging is S3? With template upgrade should not be an issue
     is_s3 = remote_settings.get('AWS_ACCESS_KEY_ID', '<unset>') != '<unset>'
@@ -825,8 +827,8 @@ def restore_db():
     require('code_dir')
     print(colors.blue('Restoring the database from the remote server'))
 
-    dump_filename = '{{ cookiecutter.repo_name }}-dump.sql'
     project_name = '{{ cookiecutter.repo_name }}'
+    dump_filename = '%s-dump.sql' % project_name
     dump_path = os.path.join('/', 'tmp', dump_filename)
 
     media_dir = get_media_dir(local=True)
