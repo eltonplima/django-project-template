@@ -790,6 +790,7 @@ def restore_media():
     media_dir = get_media_dir(local=True)
     volumes_dir = os.path.dirname(media_dir)
 
+    # this can fail when it asks you to write your password again, as the std out will be replaced
     std_out = management_cmd(
         'settings --keys '
         'AWS_ACCESS_KEY_ID '
@@ -797,7 +798,6 @@ def restore_media():
         'AWS_STORAGE_BUCKET_NAME '
     )
 
-    # this can fail for no apparent reason
     remote_settings = json.loads(re.search(r"{[^}]*?}", std_out).group())
 
     # TODO: What if locally we have setup without S3 and on staging is S3? With template upgrade should not be an issue
