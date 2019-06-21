@@ -728,13 +728,22 @@ def get_docker_compose_config(local=False):
 def get_media_dir(local=False):
     config = get_docker_compose_config(local=local)
     media_volume = next(
-        volume for volume in config['services']['django']['volumes'] if '/files/media' in volume)
+        (volume for volume in config['services']['django']['volumes'] if '/files/media' in volume),
+        None,
+    )
+    if not media_volume:
+        return None
+
     media_dir = media_volume.split(':')[0]
     return media_dir
 
 
 def copy_server_media(media_dir, volumes_dir):
     remote_media_dir = get_media_dir(local=False)
+    if not remote_media_dir:
+        print(colors.red('No media dir found!'))
+        return
+
     project_name = '{{ cookiecutter.repo_name }}'
     dump_filename = '%s-media.zip' % project_name
     dump_path = os.path.join('/', 'tmp', dump_filename)
