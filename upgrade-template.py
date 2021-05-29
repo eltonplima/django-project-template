@@ -9,6 +9,7 @@ This needs to be run in the root of the project you are upgrading.
 The template branch needs to be in your local repo, but must not be active/checked out. (git doesn't like this)
 """
 
+import argparse
 import json
 import subprocess
 import shutil
@@ -18,9 +19,23 @@ import tempfile
 from os import listdir
 from os.path import join, exists, isdir, abspath, basename
 
+import docker
 from cookiecutter.generate import generate_files
 from cookiecutter.main import prompt_for_config, generate_context
 from copy import deepcopy
+
+
+def get_codemods(context):
+    frontend_style = context['cookiecutter']['frontend_style']
+
+    codemods = []
+
+    if frontend_style == 'spa':
+        codemods.append('settings-default-export')
+        codemods.append('react-helmet-async-import')
+        codemods.append('tg-named-routes-resolve-path')
+
+    return codemods
 
 
 def load_context(path):
@@ -38,7 +53,7 @@ def dump_context(path, context):
         json.dump(context, outfile, sort_keys=True, indent=4)
 
 
-def get_or_create_context(template_context_path, context_path, template_path):
+def get_or_create_context(template_context_path, context_path, template_path, update_params):
     template_context = generate_context(context_file=template_context_path)
     ask_config = not exists(context_path)
 
@@ -63,6 +78,10 @@ def get_or_create_context(template_context_path, context_path, template_path):
                 if k == '*' or k.startswith('_'):
                     del context['cookiecutter'][k]
             ask_config = True
+
+    if update_params and not ask_config:
+        print('--update-params provided, regenerating')
+        ask_config = True
 
     if ask_config:
         # Merge existing values into the new config template, so that the user won't have to fill them in again.
@@ -194,20 +213,32 @@ def get_vcs(path):
     return None
 
 
-def update_template(path, template_path, tmp_dir):
+def update_template(path, template_path, tmp_dir, update_params=False):
     vcs = get_vcs(path)
     assert vcs, "Couldn't detect VCS in \"{}\", are you sure you have the right path?".format(path)
 
     template_vcs = get_vcs(template_path)
     template_version = template_vcs.get_version(template_path) if template_vcs else None
 
-    project_name = basename(abspath(path))
-    tmp_path = join(tmp_dir, project_name)
+    # find or create cookiecutter context
+    template_context_path = join(template_path, 'cookiecutter.json')
+    context_path = join(path, '.cookiecutterrc')
+
+    # prompt if necessary
+    context, created = get_or_create_context(template_context_path, context_path, template_path, update_params)
+    # Always dump the used config into .cookiecutterrc so that it stays up to date
+    # Don't dump the template dir (stored under '_template' key)
+    dumped_context = deepcopy(context)
+    if '_template' in dumped_context['cookiecutter']:
+        del dumped_context['cookiecutter']['_template']
+
+    tmp_path = join(tmp_dir, dumped_context['cookiecutter']['repo_name'])
 
     assert vcs.has_branch('template'), "Template branch does not exist or is active (checkout a different branch)"
     assert not isdir(tmp_path), "Can't clone temporary repo, target directory \"{}\" isn't empty".format(tmp_path)
 
     vcs.clone(source=path, target=tmp_path, branch='template')
+    dump_context(join(tmp_path, '.cookiecutterrc'), dumped_context)
 
     # clean up everything except for VCS directories and cookiecutter config
     for f in listdir(tmp_path):
@@ -219,25 +250,16 @@ def update_template(path, template_path, tmp_dir):
         else:
             os.remove(real_path)
 
-    # find or create cookiecutter context
-    template_context_path = join(template_path, 'cookiecutter.json')
-    context_path = join(path, '.cookiecutterrc')
-
-    # prompt if necessary
-    context, created = get_or_create_context(template_context_path, context_path, template_path)
-    # Always dump the used config into .cookiecutterrc so that it stays up to date
-    # Don't dump the template dir (stored under '_template' key)
-    dumped_context = deepcopy(context)
-    if '_template' in dumped_context['cookiecutter']:
-        del dumped_context['cookiecutter']['_template']
-    dump_context(join(tmp_path, '.cookiecutterrc'), dumped_context)
-
-    generate_files(
+    generated_dir = generate_files(
         repo_dir=template_path,
         context=context,
         overwrite_if_exists=True,
         output_dir=tmp_dir,
     )
+
+    # your git references are in tmp_path but template upgrade files in generated_dir
+    # but repo name should also be a valid Python identifier!
+    assert generated_dir == tmp_path, "Your .cookiecutterrc repo_name should not differ from the actual repo name"
 
     vcs.add_all(tmp_path)
 
@@ -262,19 +284,88 @@ def update_template(path, template_path, tmp_dir):
 
     vcs.push(tmp_path, branch='template')
 
+    return dumped_context
+
+
+def apply_frontend_codemod(client, codemod, path):
+    container = client.containers.run(
+        "django-project-template-frontend-codemods",
+        f"yarn transform -t {codemod}.ts /src",
+        volumes={
+            path: {'bind': '/src', 'mode': 'rw'},
+        },
+        remove=True,
+        detach=True,
+    )
+
+    print(f"Applying codemod: {codemod}")
+    for line in container.logs(stream=True):
+        print(f"\t{line.strip()}")
+
+
+def apply_frontend_codemods(path, template_path):
+    client = docker.from_env()
+
+    client.images.build(
+        path=join(template_path, 'codemods', 'frontend'),
+        tag="django-project-template-frontend-codemods",
+        rm=True,
+    )
+
+    context_path = join(path, '.cookiecutterrc')
+    context = load_context(context_path)
+    frontend_style = context['cookiecutter']['frontend_style']
+
+    if frontend_style == 'webapp':
+        frontend_path = join(path, 'webapp', 'webapp', 'src')
+    else:
+        frontend_path = join(path, 'app', 'src')
+
+    codemods = get_codemods(context)
+
+    for codemod in codemods:
+        apply_frontend_codemod(client, codemod, abspath(frontend_path))
+
 
 if __name__ == '__main__':
     template_path = os.path.dirname(__file__)
 
-    # until this is resolved: https://github.com/audreyr/cookiecutter/pull/944
-    sys.path.insert(0, os.path.abspath(os.path.join(template_path, "extensions")))
+    parser = argparse.ArgumentParser(
+        description='Upgrade django-project-template.',
+    )
 
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            update_template('.', template_path, tmp)
+    parser.add_argument('--template-path',
+                        dest='template_path',
+                        default=template_path,
+                        help=f'Path to django-project-template repository (default={template_path})')
+    parser.add_argument('--project-path',
+                        dest='project_path',
+                        default='.',
+                        help='Project to upgrade (default=.)')
+    parser.add_argument('-u', '--update-params',
+                        dest='update_params',
+                        action='store_true',
+                        help='Allow updating cookiecutter params even when keys match.')
+    parser.add_argument('--apply-frontend-codemods',
+                        dest='apply_frontend_codemods',
+                        action='store_true',
+                        help='Skip applying codemods')
 
-        print('Great! An upgrade commit was pushed to your template branch.')
-        print('Now all you need to do is merge the template branch into your main branch (be it master, a feature '
-              'branch, etc), fix any merge conflicts and commit.')
-    except AssertionError as e:
-        print('Did not upgrade: ' + ' '.join(e.args))
+    args = parser.parse_args()
+
+    # until this is resolved: https://github.com/cookiecutter/cookiecutter/pull/1240
+    sys.path.insert(0, os.path.abspath(os.path.join(args.template_path, "extensions")))
+
+    if not args.apply_frontend_codemods:
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                update_template(args.project_path, args.template_path, tmp, args.update_params)
+
+            print('Great! An upgrade commit was pushed to your template branch.')
+            print('Now all you need to do is merge the template branch into your main branch and apply codemods '
+                  '(be it master, a feature branch, etc), fix any merge conflicts and commit.')
+        except AssertionError as e:
+            print('Did not upgrade: ' + ' '.join(e.args))
+
+    if args.apply_frontend_codemods:
+        apply_frontend_codemods(args.project_path, args.template_path)

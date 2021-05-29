@@ -2,6 +2,8 @@ import os
 import subprocess
 import yaml
 
+import pytest
+
 from cookiecutter.config import USER_CONFIG_PATH
 from cookiecutter.exceptions import FailedHookException
 
@@ -10,7 +12,7 @@ def generate_project(cookies, config):
     cookies._config_file = USER_CONFIG_PATH
     result = cookies.bake(extra_context=config)
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, f"Failed to generate {result.exit_code} - {result.exception}"
     assert result.exception is None
     assert result.project.basename == config['repo_name']
     assert result.project.isdir()
@@ -21,18 +23,16 @@ def generate_project(cookies, config):
 
 
 def validate_project_works(result, config):
-    # Note: If we want to use tox to cross test this on multiple python/django/etc versions,
-    #       we should create a temporary venv for the created project before installing
-
     project_dir = str(result.project)
     project_inner_dir = str(result.project.join(config['repo_name']))
 
     with open(os.path.join(project_dir, '.gitlab-ci.yml')) as f:
-        gitlab_ci = yaml.load(f)
+        gitlab_ci = yaml.load(f, Loader=yaml.FullLoader)
 
     # Grab commands and environment from gitlab-ci
-    commands = gitlab_ci['test']['script']
-    gitlab_ci_env = gitlab_ci['test'].get('variables', {})
+    django_commands = gitlab_ci['test-django']['script']
+    node_commands = gitlab_ci['test-node']['script']
+    commands = django_commands + node_commands
 
     if not commands:
         raise ValueError(
@@ -43,42 +43,48 @@ def validate_project_works(result, config):
 
     env = os.environ.copy()
     env.update({
-        **gitlab_ci_env,
+        **gitlab_ci['test-django'].get('variables', {}),
+        **gitlab_ci['test-node'].get('variables', {}),
 
         # PWD call in Makefile reports wrong path during testing
         'PROJECT_ROOT': project_dir,
         'SITE_ROOT': project_inner_dir,
     })
 
-    for cmd in commands:
-        assert subprocess.check_call(
-            cmd.split(' '),
-            cwd=project_dir,
-            env=env,
-        ) == 0
+    try:
+        for cmd in commands:
+            subprocess.run(
+                cmd.split(' '),
+                cwd=project_dir,
+                env=env,
+                check=True,
+            )
+    finally:
+        # teardown
+        try:
+            subprocess.run(
+                ['docker-compose', 'down'],
+                cwd=project_dir,
+                env=env,
+            )
+        except:
+            print("Failed to call docker-compose down")
 
 
-def test_base_generate(cookies, default_project):
-    result = generate_project(cookies, default_project)
+@pytest.mark.parametrize('docker_base_image', ['alpine', 'debian'])
+def test_base_generate(cookies, default_project, docker_base_image):
+    config = {**default_project, 'docker_base_image': docker_base_image}
+    result = generate_project(cookies, config)
 
-    assert result.project.join('.hgignore').exists()
     assert result.project.join('.gitignore').exists()
-    assert not result.project.join('%s/templates/cms_main.html' % (default_project['repo_name'],)).exists()
 
-    validate_project_works(result, default_project)
+    assert result.project.join('webapp/').exists()
+    assert not result.project.join('app/').exists()
 
-
-def test_cms_generate(cookies, default_project):
-    default_project.update({
-        'include_cms': 'yes',
-    })
-    result = generate_project(cookies, default_project)
-
-    assert result.project.join('%s/templates/cms_main.html' % (default_project['repo_name'],)).exists()
-
-    validate_project_works(result, default_project)
+    validate_project_works(result, config)
 
 
+@pytest.mark.env("CELERY")
 def test_celery_generate(cookies, default_project):
     default_project.update({
         'include_celery': 'yes',
@@ -93,53 +99,38 @@ def test_celery_generate(cookies, default_project):
     validate_project_works(result, default_project)
 
 
-def test_doc_generate(cookies, default_project):
+@pytest.mark.env("STORYBOOK")
+def test_storybook_generate(cookies, default_project):
     default_project.update({
-        'include_docs': 'yes',
+        'webapp_include_storybook': 'yes',
     })
     result = generate_project(cookies, default_project)
 
-    assert result.project.join('%s/docs/conf.py' % (default_project['repo_name'],)).exists()
-    assert result.project.join('%s/docs/index.rst' % (default_project['repo_name'],)).exists()
+    assert result.project.join('webapp/webapp/src/.storybook/').exists()
 
     validate_project_works(result, default_project)
 
 
-def test_doc_not_generate(cookies, default_project):
+@pytest.mark.env("SPA")
+def test_spa_generate(cookies, default_project):
     default_project.update({
-        'include_docs': 'no',
+        'frontend_style': 'spa',
     })
     result = generate_project(cookies, default_project)
 
-    assert not result.project.join('%s/docs' % (default_project['repo_name'],)).exists()
-
-
-def test_celery_and_cms_generate(cookies, default_project):
-    default_project.update({
-        'include_cms': 'yes',
-        'include_celery': 'yes',
-    })
-    result = generate_project(cookies, default_project)
-
-    assert result.project.join('%s/templates/cms_main.html' % (default_project['repo_name'],)).exists()
-
-    assert result.project.join('docker-compose.yml').exists()
-    with open(result.project.join('docker-compose.yml')) as f:
-        contents = f.read()
-    assert 'celery:' in contents
+    assert result.project.join('app/').exists()
+    assert not result.project.join('webapp/').exists()
 
     validate_project_works(result, default_project)
 
 
-def test_git_generate(cookies, default_project):
+def test_storybook_not_generate(cookies, default_project):
     default_project.update({
-        'vcs': 'git',
+        'webapp_include_storybook': 'no',
     })
-
     result = generate_project(cookies, default_project)
 
-    assert result.project.join('.gitignore').exists()
-    assert not result.project.join('.hgignore').exists()
+    assert not result.project.join('webapp/webapp/src/.storybook/').exists()
 
 
 def test_invalid_project_name_is_error(cookies, default_project):
@@ -186,9 +177,9 @@ def test_invalid_test_hostname_is_error(cookies, default_project):
     assert isinstance(result.exception, FailedHookException)
 
 
-def test_invalid_live_hostname_is_error(cookies, default_project):
+def test_invalid_domain_name_is_error(cookies, default_project):
     default_project.update({
-        'live_hostname': '-foo.com',
+        'domain_name': '-foo.com',
     })
 
     result = cookies.bake(extra_context=default_project)

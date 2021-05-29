@@ -30,6 +30,10 @@ def check_remote_repository_updates():
         print("Template dir is not absolute dir or not Git repo; skipping freshness check")
         return
 
+    if os.environ.get("GITLAB_CI", "") != "":
+        print("No latest version check necessary in CI")
+        return
+
     print('Template dir:', template_dir)
     print('Checking for latest template version via git')
     subprocess.call(["git", "fetch"], cwd=template_dir)
@@ -74,30 +78,40 @@ def validate_config():
         identifier_re = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*$")
         assert bool(identifier_re.match(repo_name)), assert_msg
 
-    valid_cms_key = ['yes', 'no']
-    if "{{ cookiecutter.include_cms }}" not in valid_cms_key:
-        print("Include CMS '{{ cookiecutter.include_cms }}' is not valid!")
-        print("Valid include CMS keys are: %s" % ', '.join(valid_cms_key))
-        sys.exit(1)
-
     valid_celery_key = ['yes', 'no']
     if "{{ cookiecutter.include_celery }}" not in valid_celery_key:
         print("Include Celery '{{ cookiecutter.include_celery }}' is not valid!")
         print("Valid include Celery keys are: %s" % ', '.join(valid_celery_key))
         sys.exit(1)
 
-    valid_docs_key = ['yes', 'no']
-    if "{{ cookiecutter.include_docs }}" not in valid_docs_key:
-        print("Include docs '{{ cookiecutter.include_docs }}' is not valid!")
-        print("Valid include Docs keys are: %s" % ', '.join(valid_docs_key))
+    valid_storybook_replies = ['yes', 'no']
+    if "{{ cookiecutter.webapp_include_storybook }}" not in valid_storybook_replies:
+        print("Your answer to Include Storybook: '{{ cookiecutter.webapp_include_storybook }}' is invalid!")
+        print("Valid choices are: %s" % ', '.join(valid_storybook_replies))
         sys.exit(1)
 
-    if not re.match(r'(3\.[4-7](\.\d+)?)', "{{ cookiecutter.python_version }}"):
-        print("Only allowed python version options are 3.4.x, 3.5.x, 3.6.x and 3.7.x.")
+    valid_frontend_styles = ['webapp', 'spa']
+    if "{{ cookiecutter.frontend_style }}" not in valid_frontend_styles:
+        print("Your answer to Frontend style: '{{ cookiecutter.webapp_include_storybook }}' is invalid!")
+        print("Valid choices are: %s" % ', '.join(valid_frontend_styles))
         sys.exit(1)
 
-    if not re.match(r'((8|9|10|11)(\.\d+){0,2})', "{{ cookiecutter.node_version }}"):
-        print("Only allowed Node.js version's start from 8.")
+    valid_thorgate_key = ['yes', 'no']
+    if "{{ cookiecutter.thorgate }}" not in valid_thorgate_key:
+        print("Thorgate '{{ cookiecutter.thorgate }}' is not valid!")
+        print("Valid thorgate keys are: %s" % ', '.join(valid_thorgate_key))
+        sys.exit(1)
+
+    if not re.match(r'(alpine|debian)$', "{{ cookiecutter.docker_base_image }}"):
+        print("Only alpine and debian options for docker_base_image are supported.")
+        sys.exit(1)
+
+    if not re.match(r'(3\.[6-9](\.\d+)?)', "{{ cookiecutter.python_version }}"):
+        print("Only allowed python version options are 3.6 or later.")
+        sys.exit(1)
+
+    if not re.match(r'((8|10|11|12|14)(\.\d+){0,2})', "{{ cookiecutter.node_version }}"):
+        print("Only allowed Node.js version's start from 8 or 10 and greater.")
         sys.exit(1)
 
     valid_dme_keys = ['S3', 'GCS']
@@ -118,14 +132,14 @@ def validate_config():
         print("Test hostname is not a valid domain name")
         sys.exit(1)
 
-    live_hostname = "{{ cookiecutter.live_hostname }}"
-    if 'todo' not in live_hostname.lower():
-        if live_hostname != live_hostname.lower():
-            print("Live hostname should be lowercase")
+    domain_name = "{{ cookiecutter.domain_name }}"
+    if 'todo' not in domain_name.lower():
+        if domain_name != domain_name.lower():
+            print("Domain name should be lowercase")
             sys.exit(1)
 
-        if not FQDN(live_hostname).is_valid:
-            print("Live hostname is not a valid domain name")
+        if not FQDN(domain_name).is_valid:
+            print("Domain name is not valid")
             sys.exit(1)
 
 
@@ -134,8 +148,9 @@ def copy_cookiecutter_config(local_filename='.cookiecutterrc'):
 
     This creates the initial .cookiecutterrc file when the project is first generated.
     """
-
-    replay_filename = os.path.expanduser('~/.cookiecutter_replay/django-project-template.json')
+    template_dir = os.path.abspath('{{ cookiecutter._template }}')
+    template_name = os.path.basename(template_dir) or "django-project-template"
+    replay_filename = os.path.expanduser(f'~/.cookiecutter_replay/{template_name}.json')
     if not os.path.exists(replay_filename) or os.path.exists(local_filename):
         # This happens when we're upgrading an existing project
         return

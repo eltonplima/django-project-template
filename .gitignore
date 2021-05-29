@@ -1,6 +1,6 @@
 .idea/
+.python-version
 yarn-error.log
-.tox
 *.mo
 *.pyo
 *.pyc
@@ -8,3 +8,6 @@ yarn-error.log
 .pytest_cache
 venv/
 .venv/
+.nvmrc
+codemods/frontend/node_modules/
+.python-version

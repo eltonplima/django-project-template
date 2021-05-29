@@ -9,8 +9,15 @@ https://docs.djangoproject.com/en/dev/ref/settings/
 """
 
 import os
+{%- if cookiecutter.frontend_style == 'spa' %}
+from datetime import timedelta
+{%- endif %}
+from urllib.parse import quote
 
 import environ
+{%- if cookiecutter.include_celery == "yes" %}
+from celery.schedules import crontab
+{%- endif %}
 
 
 # Quick-start development settings - unsuitable for production
@@ -20,154 +27,137 @@ import environ
 SITE_ROOT = os.path.dirname(os.path.dirname(__file__))
 
 # Load env to get settings
-ROOT_DIR = environ.Path(SITE_ROOT)
 env = environ.Env()
 
-READ_DOT_ENV_FILE = env.bool('DJANGO_READ_DOT_ENV_FILE', default=True)
-if READ_DOT_ENV_FILE:
-    # OS environment variables take precedence over variables from .env
-    # By default use django.env file from project root directory
-    env.read_env(str(ROOT_DIR.path('django.env')))
+# Set to true during docker image building (e.g. when running collectstatic)
+IS_DOCKER_BUILD = env.bool("DJANGO_DOCKER_BUILD", default=False)
 
+PROJECT_NAME = "{{ cookiecutter.repo_name }}"
+# Shown in error pages and some other places
+PROJECT_TITLE = "{{ cookiecutter.project_title }}"
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = env.bool('DJANGO_DEBUG', default=True)
+DEBUG = env.bool("DJANGO_DEBUG", default=True)
 
-ADMINS = (
-    ('Admins', '{{ cookiecutter.admin_email }}'),
-)
+ADMINS = (("Admins", "{{ cookiecutter.admin_email }}"),)
 MANAGERS = ADMINS
-EMAIL_SUBJECT_PREFIX = '[{{cookiecutter.project_title}}] '  # subject prefix for managers & admins
+EMAIL_SUBJECT_PREFIX = "[{{cookiecutter.project_title}}] "  # subject prefix for managers & admins
 
-SESSION_COOKIE_NAME = '{{ cookiecutter.repo_name }}_ssid'
+SESSION_COOKIE_NAME = f"{PROJECT_NAME}_ssid"
+SESSION_COOKIE_DOMAIN = env.str("DJANGO_SESSION_COOKIE_DOMAIN", default=None)
+{%- if cookiecutter.frontend_style == 'spa' %}
+
+CSRF_COOKIE_DOMAIN = env.str("DJANGO_CSRF_COOKIE_DOMAIN", default=None)
+CSRF_COOKIE_HTTPONLY = False
+
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+# Tg React Url configurations should be same as frontend forgot password URL
+TGR_PASSWORD_RECOVERY_URL = "/auth/reset-password/%s"
+{%- endif %}
 
 INSTALLED_APPS = [
-    'accounts',
-    '{{cookiecutter.repo_name}}',
-{%- if cookiecutter.include_cms == 'yes' %}
-
-    'cms',
-    'treebeard',
-    'menus',
-    'sekizai',
-    'djangocms_admin_style',
-    'reversion',
-    'easy_thumbnails',
-    'filer',
-    'mptt',
-    'djangocms_file',
-    'djangocms_link',
-    'djangocms_picture',
-    'djangocms_text_ckeditor',
+    # Local apps
+    "accounts",
+    PROJECT_NAME,
+    # Third-party apps
+{%- if cookiecutter.frontend_style == 'webapp' %}
+    "django_js_reverse",
+    "webpack_loader",
+    "crispy_forms",
+{%- else %}
+    "rest_framework",
+    "django_filters",
+    "tg_react",
+    "corsheaders",
 {%- endif %}
-
-    'crispy_forms',
-    'webpack_loader',
-
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-{%- if cookiecutter.include_cms == 'yes' %}
-    'django.contrib.sites',
-{%- endif %}
-    'django.contrib.messages',
-    'django.contrib.staticfiles',
+    # Django apps
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
 ]
 
 
 MIDDLEWARE = [
-    {%- if cookiecutter.include_cms == 'yes' %}
-    'cms.middleware.utils.ApphookReloadMiddleware',
-    {%- endif %}
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    {%- if cookiecutter.include_cms == 'yes' %}
-    'django.middleware.locale.LocaleMiddleware',
-    'cms.middleware.user.CurrentUserMiddleware',
-    'cms.middleware.page.CurrentPageMiddleware',
-    'cms.middleware.toolbar.ToolbarMiddleware',
-    'cms.middleware.language.LanguageCookieMiddleware',
-    {%- endif %}
+{%- if cookiecutter.frontend_style == 'spa' %}
+    "corsheaders.middleware.CorsMiddleware",
+{%- endif %}
+    "django.contrib.sessions.middleware.SessionMiddleware",
+{%- if cookiecutter.frontend_style == 'spa' %}
+    "django.middleware.locale.LocaleMiddleware",
+{%- endif %}
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
 
 TEMPLATES = [
     {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [
-            os.path.join(SITE_ROOT, 'templates'),
-        ],
-        'APP_DIRS': True,
-        'OPTIONS': {
-            'context_processors': [
-                'django.contrib.auth.context_processors.auth',
-                'django.template.context_processors.debug',
-                'django.template.context_processors.i18n',
-                'django.template.context_processors.media',
-                'django.template.context_processors.request',
-                'django.template.context_processors.static',
-                'django.template.context_processors.tz',
-                'django.contrib.messages.context_processors.messages',
-                {%- if cookiecutter.include_cms == 'yes' %}
-                'django.template.context_processors.csrf',
-                'sekizai.context_processors.sekizai',
-                'cms.context_processors.cms_settings',
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [os.path.join(SITE_ROOT, "templates")],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.contrib.auth.context_processors.auth",
+                "django.template.context_processors.debug",
+                "django.template.context_processors.i18n",
+                "django.template.context_processors.media",
+                "django.template.context_processors.request",
+                "django.template.context_processors.static",
+                "django.template.context_processors.tz",
+                "django.contrib.messages.context_processors.messages",
+                {%- if cookiecutter.frontend_style == 'webapp' %}
+                "django_settings_export.settings_export",
                 {%- endif %}
-                'django_settings_export.settings_export',
             ],
         },
     },
 ]
-{%- if cookiecutter.include_cms == 'yes' %}
-
-THUMBNAIL_PROCESSORS = (
-    'filer.thumbnail_processors.scale_and_crop_with_subject_location',
-)
-
-CMS_TEMPLATES = (
-    ('cms_main.html', 'Main template'),
-)
-{%- endif %}
-
 
 # Database
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql_psycopg2',
-        'HOST': env.str('DJANGO_DATABASE_HOST', default='postgres'),
-        'PORT': env.int('DJANGO_DATABASE_PORT', default=5432),
-        'NAME': env.str('DJANGO_DATABASE_NAME', default='{{cookiecutter.repo_name}}'),
-        'USER': env.str('DJANGO_DATABASE_USER', default='{{cookiecutter.repo_name}}'),
-        'PASSWORD': env.str('DJANGO_DATABASE_PASSWORD', default='{{cookiecutter.repo_name}}'),
-    }
+    # When using DJANGO_DATABASE_URL, unsafe characters in the url should be encoded.
+    # See: https://django-environ.readthedocs.io/en/latest/#using-unsafe-characters-in-urls
+    "default": env.db_url(
+        "DJANGO_DATABASE_URL",
+        default="psql://{user}:{password}@{host}:{port}/{name}?sslmode={sslmode}".format(
+            host=env.str("DJANGO_DATABASE_HOST", default="postgres"),
+            port=env.int("DJANGO_DATABASE_PORT", default=5432),
+            name=quote(env.str("DJANGO_DATABASE_NAME", default="{{cookiecutter.repo_name}}")),
+            user=quote(env.str("DJANGO_DATABASE_USER", default="{{cookiecutter.repo_name}}")),
+            password=quote(
+                env.str("DJANGO_DATABASE_PASSWORD", default="{{cookiecutter.repo_name}}"),
+            ),
+            sslmode=env.str("DJANGO_DATABASE_SSLMODE", default="disable"),
+        ),
+    )
 }
 
 
-# Redis config (used for caching{% if cookiecutter.include_celery == 'yes' %} and celery{% endif %})
-REDIS_URL = env.str('DJANGO_REDIS_URL', default='redis://redis:6379/1')
-{%- if cookiecutter.include_celery == 'yes' %}
+# Redis config (used for caching{% if cookiecutter.include_celery == "yes" %} and celery{% endif %})
+REDIS_URL = env.str("DJANGO_REDIS_URL", default="redis://redis:6379/1")
+REDIS_CACHE_URL = env.str("DJANGO_REDIS_CACHE_URL", default=REDIS_URL)
+REDIS_CELERY_URL = env.str("DJANGO_REDIS_CELERY_URL", default=REDIS_URL)
 
-
-# Celery configuration
-CELERY_RESULT_BACKEND = REDIS_URL
-CELERY_REDIS_CONNECT_RETRY = True
-CELERYD_HIJACK_ROOT_LOGGER = False
-BROKER_URL = REDIS_URL
-BROKER_TRANSPORT_OPTIONS = {'fanout_prefix': True}
-
-CELERY_TIMEZONE = 'UTC'
-
+{%- if cookiecutter.include_celery == "yes" %}
 # Set your Celerybeat tasks/schedule here
+# Rest of Celery configuration lives in celery_settings.py
 CELERYBEAT_SCHEDULE = {
-    'default-task': {
+    "default-task": {
         # TODO: Remove the default task after confirming that Celery works.
-        'task': '{{cookiecutter.repo_name}}.tasks.default_task',
-        'schedule': 5,
+        "task": "{{cookiecutter.repo_name}}.tasks.default_task",
+        "schedule": 5 * 60,
+    },
+    "cleanup-old-sessions": {
+        "task": "{{cookiecutter.repo_name}}.tasks.cleanup_old_sessions",
+        # TODO define the best time suitable for the cleanup.
+        "schedule": crontab(minute=45, hour=2),
     },
 }
 {%- endif %}
@@ -177,121 +167,141 @@ CELERYBEAT_SCHEDULE = {
 CACHES = {
     "default": {
         "BACKEND": "django_redis.cache.RedisCache",
-        "LOCATION": REDIS_URL,
-        "OPTIONS": {
-            "CLIENT_CLASS": "django_redis.client.DefaultClient",
-        }
+        "LOCATION": REDIS_CACHE_URL,
+        "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient"},
     }
 }
 
 
 # Internationalization
-LANGUAGE_CODE = 'en'
+LANGUAGE_CODE = "en"
 LANGUAGES = (
-    ('en', 'English'),
-    ('et', 'Eesti keel'),
+    ("en", "English"),
+    ("et", "Eesti keel"),
 )
-LOCALE_PATHS = (
-    'locale',
-)
+LOCALE_PATHS = ("locale",)
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = "UTC"
 USE_I18N = True
 USE_L10N = True
 USE_TZ = True
 
 
 # Media files (user uploaded/site generated)
-MEDIA_ROOT = env.str('DJANGO_MEDIA_ROOT', default='/files/media')
-MEDIA_URL = env.str('DJANGO_MEDIA_URL', default='/media/')
-MEDIAFILES_LOCATION = env.str('DJANGO_MEDIAFILES_LOCATION', default='media')
+MEDIA_ROOT = env.str("DJANGO_MEDIA_ROOT", default="/files/media")
+MEDIA_URL = env.str("DJANGO_MEDIA_URL", default="/media/")
+MEDIAFILES_LOCATION = env.str("DJANGO_MEDIAFILES_LOCATION", default="media")
 
 # In staging/prod we use {{ cookiecutter.django_media_engine }} for file storage engine
-{% if cookiecutter.django_media_engine == 'S3' -%}
-AWS_ACCESS_KEY_ID = '<unset>'
-AWS_SECRET_ACCESS_KEY = '<unset>'
-AWS_STORAGE_BUCKET_NAME = '<unset>'
-AWS_DEFAULT_ACL = 'public-read'
+{% if cookiecutter.django_media_engine == "S3" -%}
+AWS_ACCESS_KEY_ID = "<unset>"
+AWS_SECRET_ACCESS_KEY = "<unset>"
+AWS_STORAGE_BUCKET_NAME = "<unset>"
+AWS_DEFAULT_ACL = "public-read"
 AWS_IS_GZIPPED = True
-AWS_S3_ENCRYPTION = True
 AWS_S3_FILE_OVERWRITE = False
-AWS_S3_REGION_NAME = 'eu-central-1'
-AWS_S3_SIGNATURE_VERSION = 's3v4'
+AWS_S3_REGION_NAME = "eu-central-1"
+AWS_S3_SIGNATURE_VERSION = "s3v4"
+
+# Only set DJANGO_AWS_S3_ENDPOINT_URL if it's defined in environment, fallback to default value in other cases
+# Useful for s3 provided by other parties than AWS, like DO.
+if env.str("DJANGO_AWS_S3_ENDPOINT_URL", default=""):
+    AWS_S3_ENDPOINT_URL = env.str("DJANGO_AWS_S3_ENDPOINT_URL")
+
+# Should be True unless using s3 provider that doesn't support it (like DO)
+AWS_S3_ENCRYPTION = env.bool("DJANGO_AWS_S3_ENCRYPTION", default=True)
 
 # This helps get around a bug in boto3 (https://github.com/boto/boto3/issues/1644)
 # Details in https://github.com/jschneier/django-storages/issues/649
 AWS_S3_ADDRESSING_STYLE = "path"
 
 AWS_S3_OBJECT_PARAMETERS = {
-    'CacheControl': 'max-age=1209600',  # 2 weeks in seconds
+    "CacheControl": "max-age=1209600",  # 2 weeks in seconds
 }
-{%- endif %}{% if cookiecutter.django_media_engine == 'GCS' -%}
-GS_BUCKET_NAME = '<unset>'
-GS_PROJECT_ID = '<unset>'
-GS_CREDENTIALS = '<unset>'
-GS_DEFAULT_ACL = 'publicRead'
+{%- endif %}
+{% if cookiecutter.django_media_engine == "GCS" -%}
+GS_BUCKET_NAME = "<unset>"
+GS_PROJECT_ID = "<unset>"
+GS_CREDENTIALS = "<unset>"
+GS_DEFAULT_ACL = "publicRead"
 GS_FILE_OVERWRITE = False
-GS_CACHE_CONTROL = 'max-age=1209600'  # 2 weeks in seconds{% endif %}
+GS_CACHE_CONTROL = "max-age=1209600"  # 2 weeks in seconds
+{%- endif %}
 
 # Static files (CSS, JavaScript, images)
-STATIC_ROOT = '/files/assets'
-STATIC_URL = env.str('DJANGO_STATIC_URL', default='/static/')
+STATIC_ROOT = "/files/assets"
+
+STATIC_URL = env.str("DJANGO_STATIC_URL", default="/{% if cookiecutter.frontend_style == 'spa' %}assets{% else %}static{% endif %}/")
+{%- if cookiecutter.frontend_style == 'webapp' %}
 STATICFILES_DIRS = (
-    os.path.join(SITE_ROOT, 'static'),
-    os.path.join(SITE_ROOT, 'app', 'build'),
+    os.path.join(SITE_ROOT, "static"),
+    os.path.join(SITE_ROOT, "webapp", "build"),
 )
+{%- else %}
+STATICFILES_DIRS = (os.path.join(SITE_ROOT, "static"),)
+{%- endif %}
 STATICFILES_FINDERS = (
-    'django.contrib.staticfiles.finders.FileSystemFinder',
-    'django.contrib.staticfiles.finders.AppDirectoriesFinder',
+    "django.contrib.staticfiles.finders.FileSystemFinder",
+    "django.contrib.staticfiles.finders.AppDirectoriesFinder",
 )
 
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = env.str('DJANGO_SECRET_KEY', default='dummy key')
+SECRET_KEY = env.str("DJANGO_SECRET_KEY", default="dummy key")
 
-AUTH_USER_MODEL = 'accounts.User'
+AUTH_USER_MODEL = "accounts.User"
 
 
 # Static site url, used when we need absolute url but lack request object, e.g. in email sending.
-SITE_URL = env.str('DJANGO_SITE_URL', default='http://127.0.0.1:8000')
-ALLOWED_HOSTS = env.list('DJANGO_ALLOWED_HOSTS', default=[])
-
-{%- if cookiecutter.include_cms == 'yes' %}
-
-SITE_ID = 1
-{%- else %}
+{%- if cookiecutter.frontend_style == 'webapp' %}
+SITE_URL = env.str("DJANGO_SITE_URL", default="http://127.0.0.1:8000")
+ALLOWED_HOSTS = env.list("DJANGO_ALLOWED_HOSTS", default=[])
+{% else %}
+SITE_URL = env.str("RAZZLE_SITE_URL", default="http://127.0.0.1:8000")
+DJANGO_SITE_URL = env.str("RAZZLE_BACKEND_SITE_URL", default="http://127.0.0.1:3000")
+ALLOWED_HOSTS = env.list(
+    "DJANGO_ALLOWED_HOSTS", default=["django", "localhost", "127.0.0.1"]
+)
+CSRF_TRUSTED_ORIGINS = env.list("DJANGO_CSRF_TRUSTED_ORIGINS", default=ALLOWED_HOSTS)
+CORS_ORIGIN_WHITELIST = [
+    f"http://{host}"
+    for host in env.list("DJANGO_CORS_ORIGIN_WHITELIST", default=ALLOWED_HOSTS)
+]
+{%- endif %}
 
 # Don't allow site's content to be included in frames/iframes.
-X_FRAME_OPTIONS = 'DENY'
+X_FRAME_OPTIONS = "DENY"
+
+
+ROOT_URLCONF = f"{PROJECT_NAME}.urls"
+
+WSGI_APPLICATION = f"{PROJECT_NAME}.wsgi.application"
+
+
+LOGIN_REDIRECT_URL = "/"
+{%- if cookiecutter.frontend_style == 'spa' %}
+LOGIN_URL = "admin:login"
+LOGOUT_REDIRECT_URL = "admin:login"
+{%- else %}
+LOGIN_URL = "login"
+LOGOUT_REDIRECT_URL = "login"
 {%- endif %}
 
 
-ROOT_URLCONF = '{{cookiecutter.repo_name}}.urls'
-
-WSGI_APPLICATION = '{{cookiecutter.repo_name}}.wsgi.application'
-
-
-LOGIN_REDIRECT_URL = '/'
-LOGIN_URL = 'login'
-LOGOUT_REDIRECT_URL = 'login'
-
-
 # Crispy-forms
-CRISPY_TEMPLATE_PACK = 'bootstrap4'
+CRISPY_TEMPLATE_PACK = "bootstrap4"
 
 
 # Email config
-DEFAULT_FROM_EMAIL = "{{cookiecutter.project_title}} <info@{{ cookiecutter.live_hostname }}>"
-SERVER_EMAIL = "{{cookiecutter.project_title}} server <server@{{ cookiecutter.live_hostname }}>"
+DEFAULT_FROM_EMAIL = f"{PROJECT_TITLE} <info@{{ cookiecutter.domain_name }}>"
+SERVER_EMAIL = f"{PROJECT_TITLE} server <server@{{ cookiecutter.domain_name }}>"
 
-# Show emails in the console, but don't send them.
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 
-# SMTP  --> This is only used in staging and production
-EMAIL_HOST = env.str('DJANGO_EMAIL_HOST', default='smtp.sparkpostmail.com')
-EMAIL_PORT = env.int('DJANGO_EMAIL_PORT', default=587)
-EMAIL_HOST_USER = env.str('DJANGO_EMAIL_HOST_USER', default='SMTP_Injection')
-EMAIL_HOST_PASSWORD = env.str('DJANGO_EMAIL_HOST_PASSWORD', default='')
+EMAIL_HOST = "mailhog"
+EMAIL_PORT = 1025
+EMAIL_HOST_USER = ""
+EMAIL_HOST_PASSWORD = ""
 
 
 # Base logging config. Logs INFO and higher-level messages to console. Production-specific additions are in
@@ -299,61 +309,110 @@ EMAIL_HOST_PASSWORD = env.str('DJANGO_EMAIL_HOST_PASSWORD', default='')
 #  Notably we modify existing Django loggers to propagate and delegate their logging to the root handler, so that we
 #  only have to configure the root handler.
 LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'formatters': {
-        'default': {
-            'format': '%(asctime)s [%(levelname)s] %(name)s:%(lineno)d %(funcName)s - %(message)s'
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "default": {
+            "format": "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d %(funcName)s - %(message)s"
         },
     },
-    'filters': {
-        'require_debug_false': {
-            '()': 'django.utils.log.RequireDebugFalse'
-        }
+    "filters": {"require_debug_false": {"()": "django.utils.log.RequireDebugFalse"}},
+    "handlers": {"console": {"class": "logging.StreamHandler", "formatter": "default"}},
+    "loggers": {
+        "": {"handlers": ["console"], "level": "INFO"},
+        "django": {"handlers": [], "propagate": True},
+        "django.request": {"handlers": [], "propagate": True},
+        "django.security": {"handlers": [], "propagate": True},
     },
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-            'formatter': 'default',
-        }
-    },
-    'loggers': {
-        '': {
-            'handlers': ['console'],
-            'level': 'INFO',
-        },
-        'django': {'handlers': [], 'propagate': True},
-        'django.request': {'handlers': [], 'propagate': True},
-        'django.security': {'handlers': [], 'propagate': True},
-    }
 }
 
-TEST_RUNNER = 'django.test.runner.DiscoverRunner'
+TEST_RUNNER = "django.test.runner.DiscoverRunner"
 
 
 # Disable a few system checks. Careful with these, only silence what your really really don't need.
 # TODO: check if this is right for your project.
 SILENCED_SYSTEM_CHECKS = [
-    'security.W001',  # we don't use SecurityMiddleware since security is better applied in nginx config
+    "security.W001",  # we don't use SecurityMiddleware since security is better applied in nginx config
 ]
 
+{%- if cookiecutter.frontend_style == 'spa' %}
+
+# Rest framework configuration
+REST_FRAMEWORK = {
+    # Disable Basic auth
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        # By default api session authentication is not used
+        # "rest_framework.authentication.SessionAuthentication",
+    ),
+    "DEFAULT_FILTER_BACKENDS": ("django_filters.rest_framework.DjangoFilterBackend",),
+    # Change default full-url media files to be only stored path, needs /media prepended in frontend
+    "UPLOADED_FILES_USE_URL": False,
+    # Default request format in tests is json
+    "TEST_REQUEST_DEFAULT_FORMAT": "json",
+    # Prevent the data changing by anonymous users
+    # TODO: change it to more suitable for the project
+    "DEFAULT_PERMISSION_CLASSES": (
+        "rest_framework.permissions.IsAuthenticatedOrReadOnly",
+    ),
+}
+{%- endif %}
 
 # Default values for sentry
-RAVEN_BACKEND_DSN = env.str('DJANGO_RAVEN_BACKEND_DSN', default='https://TODO:TODO@sentry.thorgate.eu/TODO')
-RAVEN_PUBLIC_DSN = env.str('DJANGO_RAVEN_PUBLIC_DSN', default='https://TODO@sentry.thorgate.eu/TODO')
-RAVEN_CONFIG = {'dsn': RAVEN_BACKEND_DSN}
+# Example: https://TODO@sentry.thorgate.eu/TODO
+SENTRY_DSN = env.str("DJANGO_SENTRY_DSN", default="")
+SENTRY_ENVIRONMENT = env.str("DJANGO_SENTRY_ENVIRONMENT", default="local")
+
+if SENTRY_DSN and not IS_DOCKER_BUILD:
+    import sentry_sdk  # NOQA
+    from sentry_sdk.integrations.django import DjangoIntegration  # NOQA
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[DjangoIntegration()],
+        environment=SENTRY_ENVIRONMENT,
+        # Send authenticated user information with sentry events (needs django.contrib.auth)
+        send_default_pii=True,
+    )
+
+{%- if cookiecutter.frontend_style == 'webapp' %}
 
 WEBPACK_LOADER = {
-    'DEFAULT': {
-        'BUNDLE_DIR_NAME': '',
-        'STATS_FILE': os.path.join(SITE_ROOT, 'app', 'webpack-stats.json'),
-    }
+    "DEFAULT": {
+        "BUNDLE_DIR_NAME": "",
+        "STATS_FILE": os.path.join(SITE_ROOT, "webapp", "webpack-stats.json"),
+    },
 }
 
 # All these settings will be made available to javascript app
 SETTINGS_EXPORT = [
-    'DEBUG',
-    'SITE_URL',
-    'STATIC_URL',
-    'RAVEN_PUBLIC_DSN',
+    "DEBUG",
+    "SITE_URL",
+    "STATIC_URL",
+    "SENTRY_DSN",
+    "SENTRY_ENVIRONMENT",
+    "PROJECT_TITLE",
 ]
+
+# django-js-reverse
+JS_REVERSE_JS_VAR_NAME = "reverse"
+JS_REVERSE_JS_GLOBAL_OBJECT_NAME = "DJ_CONST"
+JS_REVERSE_EXCLUDE_NAMESPACES = ["admin", "djdt"]
+{%- else %}
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ROTATE_REFRESH_TOKENS": True,
+    "ALGORITHM": "HS256",
+    "SIGNING_KEY": SECRET_KEY,
+    "AUTH_HEADER_TYPES": ("Bearer",),
+    "USER_ID_FIELD": "pk",
+    "USER_ID_CLAIM": "user_id",
+}
+
+
+# CORS settings
+CORS_ORIGIN_ALLOW_ALL = True
+CORS_ALLOW_CREDENTIALS = True
+{%- endif %}
